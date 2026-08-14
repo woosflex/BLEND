@@ -7,6 +7,39 @@ OBJS=		kthread.o kalloc.o misc.o bseq.o sketch.o sdust.o options.o index.o \
 PROG=		blend
 LIBS=		-lm -lz -lpthread
 
+# --- TracEon backend (optional; default off) ---
+# TRACEON=1 backs BLEND's per-bucket khash_t(idx) minimizer table with
+# TracEon's traceon_kmer C API (libtraceon_kmer.a, see
+# https://github.com/woosflex/TracEon). All BLEND objects still compile as C
+# (gcc); only the FINAL executable link is driven by the C++ driver ($(CXX))
+# so libstdc++/libtraceon_kmer symbols resolve. TRACEON_INC/TRACEON_LIB point
+# at the TracEon include dir and build dir and are overridable on the command
+# line. `make TRACEON=1 clean && make TRACEON=1` builds the traceon binary;
+# plain `make` stays byte-for-byte on the stock khash path.
+#
+# TCACHE=1 is an ALIAS that forces TRACEON=1 and additionally builds the
+# TRC2 ".tcache" open-addressing cache (mm_traceon_cache.c + the CRC32C shim
+# mm_traceon_crc.cpp) into the same binary: a .tcache file stores each bucket's
+# minimizer entries as open-addressing slot arrays with cumulative offset
+# tables, so `blend ref.tcache reads.fq` mmap()s the index and points the
+# buckets at the mapped arrays — zero table rebuild, O(1) hash-probe lookups.
+# There is no separate "tcache-only" binary: the stock build (make) keeps pure
+# khash, the TRACEON/TCACHE build keeps the traceon table backend AND the
+# flat cache.
+TRACEON ?= 0
+TCACHE ?= 0
+ifeq ($(TCACHE),1)
+TRACEON := 1
+endif
+CXX ?= g++
+TRACEON_INC ?= $(HOME)/agent_workspace/TracEon/include
+TRACEON_LIB ?= $(HOME)/agent_workspace/TracEon/build
+ifeq ($(TRACEON),1)
+CPPFLAGS += -DTRACEON_BACKEND -I$(TRACEON_INC)
+LIBS += -L$(TRACEON_LIB) -ltraceon_kmer
+OBJS += mm_traceon_cache.o mm_traceon_crc.o
+endif
+
 ifeq ($(arm_neon),) # if arm_neon is not defined
 ifeq ($(sse2only),) # if sse2only is not defined
 	OBJS+=ksw2_extz2_sse41.o ksw2_extd2_sse41.o ksw2_exts2_sse41.o ksw2_extz2_sse2.o ksw2_extd2_sse2.o ksw2_exts2_sse2.o ksw2_dispatch.o
@@ -33,7 +66,7 @@ ifneq ($(tsan),)
 	LIBS+=-fsanitize=thread
 endif
 
-.PHONY:all extra clean depend
+.PHONY:all extra clean depend FORCE
 .SUFFIXES:.c .o
 
 .c.o:
@@ -41,11 +74,33 @@ endif
 
 all:$(PROG)
 
+# Rebuild all objects when the compile flags change (switching modes with
+# `make` vs `make TRACEON=1` vs `make TCACHE=1`): make does not otherwise
+# notice -D/-I changes, so a stale-mode object mix would silently link into
+# the wrong backend. The stamp file records the effective flags; its mtime
+# only moves when the flags actually change.
+BUILD_FLAGS = $(CFLAGS) $(CPPFLAGS) $(INCLUDES)
+FORCE:
+.build_flags: FORCE
+	@echo '$(BUILD_FLAGS)' | cmp -s - $@ || echo '$(BUILD_FLAGS)' > $@
+$(OBJS): .build_flags
+
 blend:main.o libminimap2.a
+ifeq ($(TRACEON),1)
+		$(CXX) $(CFLAGS) main.o -o $@ -L. -lminimap2 $(LIBS)
+else
 		$(CC) $(CFLAGS) main.o -o $@ -L. -lminimap2 $(LIBS)
+endif
 
 libminimap2.a:$(OBJS)
-		$(AR) -csru $@ $(OBJS)
+		$(AR) -csr $@ $(OBJS) # NB: no -u: ar -u compares member mtimes at second granularity and can silently keep a stale member when a mode-switch rebuild lands in the same second
+
+# The CRC32C shim is the only C++ TU: it wraps TracEon's header-only
+# Crc32c.h. -DTRACEON_HAS_AVX2 unlocks the SSE4.2 crc32 instruction path
+# (the function carries a target("sse4.2") attribute, so no global -msse4.2
+# is needed). Only referenced in TRACEON builds.
+mm_traceon_crc.o:mm_traceon_crc.cpp
+		$(CXX) -c -g -Wall -O2 -DTRACEON_HAS_AVX2 -I$(TRACEON_INC) $< -o $@
 
 sdust:sdust.c kalloc.o kalloc.h kdq.h kvec.h kseq.h ketopt.h sdust.h
 		$(CC) -D_SDUST_MAIN $(CFLAGS) $< kalloc.o -o $@ -lz

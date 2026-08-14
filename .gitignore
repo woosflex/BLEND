@@ -84,3 +84,6 @@ test/figures/*/*/*.eps
 test/figures/*/*.pdf
 test/mhap/*.out
 test/mhap/*.err
+
+# TracEon backend mode-switch stamp (see src/Makefile)
+src/.build_flags

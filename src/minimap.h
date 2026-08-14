@@ -48,6 +48,9 @@
 #define B_I_STROBEMERS    0x10
 
 #define MM_IDX_MAGIC   "MMI\2"
+#ifdef TRACEON_BACKEND
+#define MM_TCACHE_MAGIC "TRC2"
+#endif
 
 #define MM_MAX_SEG       255
 
@@ -87,6 +90,11 @@ typedef struct {
 	uint32_t n_seq;            // number of reference sequences
 	int32_t index;
 	int32_t n_alt;
+#ifdef TRACEON_BACKEND
+	int32_t is_tcache;   // 1 if the buckets/ref point into a mmap'd .tcache file
+	void *tcache_map;    // the mmap base (for munmap at destroy); NULL otherwise
+	int64_t tcache_size; // mmap size
+#endif
 	mm_idx_seq_t *seq;         // sequence name, length and offset
 	uint32_t *S;               // 4-bit packed sequence
 	struct mm_idx_bucket_s *B; // index (hidden)
@@ -187,6 +195,11 @@ typedef struct {
 	int64_t idx_size;
 	mm_idxopt_t opt;
 	FILE *fp_out;
+#ifdef TRACEON_BACKEND
+	int is_tcache;   // input file is a TRC2 .tcache (or obsolete TRC1 -> loader error)
+	int tcache_out;  // -d FILE ends in .tcache: write the TRC2 cache format
+	char *fn_out;    // strdup'd -d filename (so a failed dump can remove the file)
+#endif
 	union {
 		struct mm_bseq_file_s *seq;
 		FILE *idx;
@@ -292,6 +305,39 @@ mm_idx_t *mm_idx_load(FILE *fp);
  * @param mi         minimap2 index
  */
 void mm_idx_dump(FILE *fp, const mm_idx_t *mi);
+
+#ifdef TRACEON_BACKEND
+/**
+ * Save the index in the TRC2 ".tcache" open-addressing cache format
+ * (zero-rebuild, mmap-loadable; see mm_traceon_cache.c for the byte layout).
+ * Only available in TRACEON builds. Returns 0 on success, -1 on I/O error.
+ */
+int mm_tcache_dump(FILE *fp, const mm_idx_t *mi);
+
+/**
+ * Load a TRC2 ".tcache" file: mmap, verify the whole-file CRC32C trailer, and
+ * point the index structures (buckets, p arrays, packed sequence) directly at
+ * the mapped arrays. No table rebuild, no inserts. Returns NULL on any error
+ * (bad magic/version/CRC/size) or I/O failure.
+ */
+mm_idx_t *mm_tcache_load(FILE *fp);
+
+/* Bucket accessor boundary for mm_traceon_cache.c (see index.c). The bucket
+ * struct itself stays private to index.c so the stock build is byte-identical
+ * to pristine; these are compiled only into TRACEON builds. */
+typedef struct {
+	int64_t ecount;      /* logical (key,value) entry count */
+	int32_t n;           /* p-array entry count (b->n) */
+	const uint64_t *p;   /* position array */
+	const void *h;       /* traceon handle (kmerindex_t*; NULL if empty or tcache) */
+	const uint64_t *fe;  /* tcache slot array (key,value interleaved; NULL unless tcache) */
+	const uint8_t *bm;   /* tcache occupancy bitmap */
+	uint32_t cap;        /* tcache table capacity */
+} mm_bucket_view_t;
+void mm_bucket_view(const mm_idx_t *mi, uint32_t i, mm_bucket_view_t *out);
+void mm_bucket_attach_tcache(mm_idx_t *mi, uint32_t i, const uint64_t *p, int32_t n,
+                             const uint64_t *fe, const uint8_t *bm, uint32_t cap, int32_t ne);
+#endif
 
 /**
  * Create an index from strings in memory
@@ -421,6 +467,11 @@ int mm_idx_name2id(const mm_idx_t *mi, const char *name);
 int mm_idx_getseq(const mm_idx_t *mi, uint32_t rid, uint32_t st, uint32_t en, uint8_t *seq);
 
 int mm_idx_alt_read(mm_idx_t *mi, const char *fn);
+#ifdef TRACEON_BACKEND
+// mm_idx_init is defined in index.c (not declared upstream); mm_traceon_cache.c
+// needs it to rebuild the mm_idx_t shell when loading a .tcache file.
+mm_idx_t *mm_idx_init(int w, int blend_bits, int k, int k_shift, int b, int isMinimzer, int flag);
+#endif
 int mm_idx_bed_read(mm_idx_t *mi, const char *fn, int read_junc);
 int mm_idx_bed_junc(const mm_idx_t *mi, int32_t ctg, int32_t st, int32_t en, uint8_t *s);
 
