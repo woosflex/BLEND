@@ -170,3 +170,26 @@ If you use BLEND in your work, please cite:
   pages = {lqad004},
 }
 ```
+
+## TracEon build options (this fork)
+
+This fork adds an opt-in TracEon backend; plain `make` is byte-identical to
+upstream.
+
+* `make TRACEON=1` — backs BLEND's per-bucket khash_t(idx) minimizer table
+  (`src/index.c`) with TracEon's `traceon_kmer` C API (`libtraceon_kmer.a`, see
+  https://github.com/woosflex/TracEon). All BLEND objects still compile as C;
+  only the final executable link is driven by `$(CXX)` so libstdc++ /
+  libtraceon_kmer symbols resolve. `TRACEON_INC`/`TRACEON_LIB` point at the
+  TracEon include dir and build dir and are overridable on the command line.
+* `make TCACHE=1` — alias for `TRACEON=1` that additionally enables the TRC2
+  `.tcache` cache (`src/mm_traceon_cache.c` + the CRC32C shim
+  `src/mm_traceon_crc.cpp`): `blend -d ref.tcache ref.fa` writes each bucket's
+  minimizer entries as open-addressing slot arrays with cumulative offset
+  tables and a whole-file CRC32C trailer; `blend ref.tcache reads.fq` mmap()s
+  the file, verifies the CRC, and points the buckets at the mapped arrays —
+  zero table rebuild on every run, O(1) hash-probe lookups. Layout documented
+  at the top of `src/mm_traceon_cache.c`.
+
+Stock mode is unchanged: `make` produces the exact upstream binary. The TracEon
+modes preserve byte-identical output.
